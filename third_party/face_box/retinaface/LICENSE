@@ -1,0 +1,34 @@
+MIT License
+
+Copyright (c) 2020 Vladimir Iglovikov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Source: https://github.com/ternaus/retinaface
+
+NOTE: box_utils.py's `decode` function carries a code comment crediting
+https://github.com/Hakuyume/chainer-ssd, which itself has no license. However,
+the identical function (same code, comments, and variable names) is also
+present, under MIT, in https://github.com/amdegroot/ssd.pytorch and
+https://github.com/biubug6/Pytorch_Retinaface — verified by direct comparison.
+Provenance for this function is therefore traced through those MIT-licensed
+repos rather than the unlicensed chainer-ssd origin. See
+../../../THIRD_PARTY_LICENSES.md for details.

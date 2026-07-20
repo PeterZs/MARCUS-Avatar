@@ -128,7 +128,9 @@ Local maintenance, evaluation, and experimental helper scripts are intentionally
 
 ## License
 
-This project is released under the MIT License.
+This project is released under the MIT License (see [LICENSE](LICENSE)).
+Code vendored under `third_party/` retains its own upstream licenses — see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for details.
 
 ## Citation
 
