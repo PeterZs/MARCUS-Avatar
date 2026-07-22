@@ -1,35 +1,38 @@
-[project]
+[workspace]
 name = "MARCUS-Avatar"
 version = "0.1.0"
 description = "Monocular Avatar Reconstruction via Cascaded Diffusion Priors and UV-Space Differentiable Shading"
 authors = ["Hong Li <lihong@buaa.edu.cn>"]
-channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64", "win-64"]
+channels = ["conda-forge", "pytorch", "nvidia"]
+platforms = [{ platform = "linux-64", cuda = "12.8" }]
 
 [dependencies]
-python = ">=3.10"
-pytorch = ">=2.0.0"
-torchvision = ">=0.15.0"
+python = "3.10.*"
+cuda-version = "12.8.*"
 numpy = ">=1.24.0"
 scipy = ">=1.10.0"
 scikit-image = ">=0.20.0"
 opencv = ">=4.8.0"
 pillow = ">=9.0.0"
 imageio = ">=2.31.0"
-mediapipe = ">=0.10.0"
 tqdm = ">=4.65.0"
-huggingface_hub = ">=0.20.0"
+huggingface_hub = ">=0.34.0,<1.0"
 
 [pypi-dependencies]
-diffusers = ">=0.27.0"
-transformers = ">=4.36.0"
-accelerate = ">=0.25.0"
-peft = ">=0.8.0"
+torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { index = "https://download.pytorch.org/whl/cu128" }
+# Pinned to the official LongCat-Image environment (diffusers 0.35.x has no native
+# LongCatImageTransformer2DModel, so the vendored class in longcat_image.models is used).
+diffusers = "==0.35.2"
+transformers = "==4.57.1"
+accelerate = "==1.11.0"
+peft = "==0.18.0"
 safetensors = ">=0.4.0"
 einops = ">=0.8.0"
 sentencepiece = ">=0.2.0"
 gradio = ">=4.0.0"
 tensorflow = ">=2.15.0"
+mediapipe = ">=0.10.0"
 mtcnn = ">=1.0.0"
 albumentations = ">=2.0.0"
 kornia = ">=0.8.0"
@@ -38,11 +41,12 @@ pygltflib = ">=1.16.0"
 trimesh = ">=4.0.0"
 easydict = ">=1.10"
 torchsummary = ">=1.5.1"
+realesrgan = ">=0.3.0"
 
 [tasks]
 download-weights = "python download_weights.py"
-app = "python app.py"
-batch-infer = "python batch_infer.py"
-
-[system-requirements]
-cuda = "12.1"
+# basicsr 1.4.2 imports torchvision.transforms.functional_tensor, which was removed in
+# torchvision >= 0.18; rewrite the import in the installed package (idempotent).
+patch-basicsr = "sed -i 's|torchvision\\.transforms\\.functional_tensor|torchvision.transforms.functional|' $PIXI_PROJECT_ROOT/.pixi/envs/default/lib/python3.10/site-packages/basicsr/data/degradations.py"
+app = { cmd = "python app.py", depends-on = ["patch-basicsr"] }
+batch-infer = { cmd = "python batch_infer.py", depends-on = ["patch-basicsr"] }

@@ -35,6 +35,8 @@ weights/
 outputs/
 results/
 cache/
+.cache/
+.pixi/
 longcat_image/render/test_render/
 tmp_cache/
 tmp_materials/

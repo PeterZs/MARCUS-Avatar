@@ -25,22 +25,27 @@ import uvicorn
 from utils import save_glb_with_specular, save_glb_white_model, save_blend_file
 
 sys.path.append(os.getcwd()) 
-from utils import read_img, np2tensor, np2pillow
+from utils import np2tensor, np2pillow
 from longcat_image.preprocess import Preprocess_API
 from longcat_image.face3d_recon import Face3d_Recon_API
 from longcat_image.tex import Tex_API
 from longcat_image.models.pipeline_longcat_inpainting import LongCatImageInpaintingPipeline
 from longcat_image.models import LongCatImageTransformer2DModel
 
-from peft import LoraConfig, PeftModel
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+import diffusers
+
+# diffusers 0.35.x has no native LongCatImageTransformer2DModel, but the checkpoint's
+# model_index.json references ["diffusers", "LongCatImageTransformer2DModel"]. Register the
+# vendored class into the diffusers namespace so pipeline from_pretrained() can resolve it.
+diffusers.LongCatImageTransformer2DModel = LongCatImageTransformer2DModel
+
+from peft import PeftModel
 from longcat_image.models.pipeline_intrinsix_image_edit import IntrinsiXEditPipeline
 from longcat_image.models.batch_lora import inject_trainable_batched_lora
 from safetensors.torch import load_file
 from longcat_image.models.cross_intrinsic_attention import CrossIntrinsicAttnProcessor2_0
 from runtime_paths import (
     BASE_MODEL_PATH,
-    JOY_CAPTION_MODEL,
     TOPO_DIR,
     ckpt_path,
     is_local_model_path,
@@ -97,8 +102,6 @@ def validate_runtime_files():
         required_paths[f"{name} LoRA"] = path
     if is_local_model_path(BASE_MODEL_PATH):
         required_paths["base diffusion model"] = BASE_MODEL_PATH
-    if is_local_model_path(JOY_CAPTION_MODEL):
-        required_paths["JoyCaption model"] = JOY_CAPTION_MODEL
 
     missing = [f"{name}: {path}" for name, path in required_paths.items() if not Path(path).exists()]
     if missing:
@@ -107,7 +110,7 @@ def validate_runtime_files():
             "MARCUS-Avatar runtime files are missing:\n"
             f"{message}\n\n"
             "Run `python download_weights.py` to restore ckpts/ and assets/topo/. "
-            "Set BASE_MODEL_PATH and JOY_CAPTION_MODEL if those models live elsewhere."
+            "Set BASE_MODEL_PATH if the base model lives elsewhere."
         )
 
 
@@ -128,7 +131,6 @@ preprocess_model = Preprocess_API(
 
 face3d_model = Face3d_Recon_API(
     pfm_model_path=topo_path("hifi3dpp_model_info.mat"),
-    # recon_model_path=ckpt_path("deep3d_merge_model/epoch_latest.pth"),
     recon_model_path=ckpt_path("deep3d_model/epoch_latest.pth"),
     image_super_net_path=ckpt_path("sr_model/RealESRGAN_x4plus.pth"),
     focal=1015.0, camera_distance=10.0, device=DEVICE, use_merge_model=False,
@@ -141,8 +143,16 @@ tex_model = Tex_API(
 )
 
 # load base pipeline
+# diffusers 0.35.x has no native LongCatImageTransformer2DModel, so the transformer
+# must be loaded explicitly with the vendored class and passed in (as upstream does).
+base_transformer = LongCatImageTransformer2DModel.from_pretrained(
+    BASE_MODEL_PATH,
+    subfolder="transformer",
+    torch_dtype=torch.bfloat16,
+)
 pipe = LongCatImageInpaintingPipeline.from_pretrained(
     BASE_MODEL_PATH,
+    transformer=base_transformer,
     torch_dtype=torch.bfloat16,
 )
 
@@ -217,61 +227,13 @@ intrinsix_pipeline.set_attn_processor(crossattn_processor)
 intrinsix_pipeline = intrinsix_pipeline.to(DEVICE)
 print(f"[INFO] Intrinsix pipeline moved to {DEVICE}")
 
+# reduce VAE memory spikes at decode time (the VAE is shared by both pipelines)
+pipe.vae.enable_slicing()
+pipe.vae.enable_tiling()
+
 
 def apply_mask(image, mask):
     return Image.composite(image, Image.new("RGB", image.size, (0, 0, 0)), mask)
-
-class JoyCaptioner:
-    def __init__(self, model_name, device):
-        print(f"[INFO] Loading JoyCaption: {model_name}")
-        self.processor = AutoProcessor.from_pretrained(model_name)
-        self.model = LlavaForConditionalGeneration.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16, device_map=device
-        )
-        self.model.eval()
-        self.device = device
-        
-        self.uv_prompt_with_lighting = """
-        Analyze this facial image focusing on physical attributes and lighting. 
-        Ignore the background.
-        Provide a concise, comma-separated description covering:
-        1. Demographics: Age, Gender, Ethnicity.
-        2. Skin Details: Describe texture (pores, wrinkles, moles, scars, facial hairs), skin tone.
-        4. Lighting: Direction, Color Tint (e.g. blue/red light), Contrast, Shadows.
-        
-        Do NOT describe the image composition (e.g. "close-up", "portrait"), just the face itself.
-        """
-        
-        self.uv_prompt_without_lighting = """
-        Analyze this facial image focusing on physical attributes only. 
-        Ignore the background and lighting conditions.
-        Provide a concise, comma-separated description covering:
-        1. Demographics: Age, Gender, Ethnicity.
-        2. Skin Details: Describe texture (pores, wrinkles, moles, scars, and facial hair), skin tone, facial features.
-        
-        Do NOT describe:
-        - Lighting conditions (direction, color, brightness, shadows, contrast)
-        - Image composition (e.g. "close-up", "portrait")
-        - Camera angles or exposure settings
-        
-        Focus only on the inherent physical characteristics of the face.
-        """
-
-    def caption(self, image, include_lighting=True):
-        if image.mode != "RGB": image = image.convert("RGB")
-        prompt = self.uv_prompt_with_lighting if include_lighting else self.uv_prompt_without_lighting
-        convo = [{"role": "system", "content": "You are a helpful image captioner."},
-                 {"role": "user", "content": prompt}]
-        convo_str = self.processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=[convo_str], images=[image], return_tensors="pt").to(self.device)
-        inputs['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
-        with torch.no_grad():
-            gen_ids = self.model.generate(**inputs, max_new_tokens=300, do_sample=True, temperature=0.6)[0]
-        gen_ids = gen_ids[inputs['input_ids'].shape[1]:]
-        return self.processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-
-joy_captioner = JoyCaptioner(JOY_CAPTION_MODEL, DEVICE)
-
 
 def save_obj(path, vertices, faces, uvs, face_uvs):
     with open(path, 'w') as f:
@@ -282,24 +244,13 @@ def save_obj(path, vertices, faces, uvs, face_uvs):
             f_v, f_vt = faces[i] + 1, face_uvs[i] + 1
             f.write(f"f {f_v[0]}/{f_vt[0]} {f_v[1]}/{f_vt[1]} {f_v[2]}/{f_vt[2]}\n")
 
-def sanitize_caption(raw_caption):
-    blacklist = [
-        "mask-like", "black rectangular", "irregular edges", 
-        "missing", "cropped", "black background", "no visible texture",
-        "artificial", "stylized", "close-up", "portrait of"
-    ]
-    clean_caption = raw_caption
-    for word in blacklist:
-        clean_caption = clean_caption.replace(word, "")
-    return clean_caption.strip(", ")
-
 
 # ================= Step Functions (new set_adapter_safe) =================
 
 def step1_preprocess(input_img, seed, use_erosion=True, erosion_iterations=1, erosion_kernel_size=12, use_sr=True, use_glasses=False):
     try:
         if input_img is None: 
-            return None, None, None, None, None, "Please upload an image."
+            return None, None, None, None, None, None, "Please upload an image."
         
         timestamp = int(time.time())
         unique_id = f"res_{timestamp}"
@@ -467,79 +418,6 @@ def apply_manual_paint(state, painted_image):
         import traceback
         print(traceback.format_exc())
         return None, None, None, str(e)
-
-def step2_caption(state):
-    try:
-        if not state or "input_image" not in state: 
-            return [None] * 6 + ["Please run Step 1 first."] # Return Nones for textboxes (caption, inpaint, delight, align_albedo, align_normal, align_rsd)
-        
-        print("[INFO] Generating Caption from original input image...")
-        input_image = state["input_image"]
-        
-        # 1. call JoyCaptioner twice, generate two versions of Caption
-        # - first time: include lighting description (for Inpaint)
-        # - second time: no lighting description (for other LoRAs)
-        print("[INFO] Generating caption with lighting (for Inpaint)...")
-        raw_caption_with_lighting = joy_captioner.caption(input_image, include_lighting=True)
-        caption_with_lighting = sanitize_caption(raw_caption_with_lighting)
-        
-        print("[INFO] Generating caption without lighting (for other LoRAs)...")
-        raw_caption_without_lighting = joy_captioner.caption(input_image, include_lighting=False)
-        caption_without_lighting = sanitize_caption(raw_caption_without_lighting)
-        
-        # save the complete version to state (for display)
-        state["caption"] = caption_with_lighting
-        
-        # 2. build semantic header (Semantic Header)
-        semantic_header_inpaint = f"An unfolded UV texture map of {caption_with_lighting}"
-        semantic_header_others = f"An unfolded UV texture map of {caption_without_lighting}"
-        
-        # 5. automatically assemble prompts for each stage
-        
-        # For Step 3.1: Inpainting (use complete caption, include lighting information)
-        prompt_inpaint = f"{semantic_header_inpaint}, seamless, continuous texture, high fidelity, 8k resolution. Synthesize high-frequency micro-details, pixel-perfect continuity."
-        
-        # For Step 3.2: Delight (use caption without lighting)
-        base_delight_def = "Normalized lighting texture map, calibrated neutral illumination. Uniform pixel intensity distribution across the entire facial surface. Eliminate all lighting gradients, environmental bias, and directional shading. Perfectly balanced exposure, strictly retaining high-frequency micro-details, razor-sharp pores, and authentic skin grain. High-fidelity raw texture quality. Raw, 8k, highly detailed, macro photography, hard focus. Remove all lighting, shadows, and shading. Generate flat, unlit base color texture."
-        prompt_delight = f"{semantic_header_others} {base_delight_def}"
-        
-        # For Step 4: Align (use caption without lighting)
-        # we put the semantic at the front, and the technical parameters at the back
-        
-        base_albedo_def = "Ultra-High Definition 8K Diffuse Albedo map, flat lighting, unlit base color, pixel-perfect clarity. The texture reveals natural melanin pigmentation, hemoglobin redness, and distinct subsurface scattering warmth zones. The chart is completely void of baked shadows, ambient occlusion, or specular highlights, representing pure biological skin color values in UV space."
-        prompt_albedo = f"{semantic_header_others} {base_albedo_def}"
-        prompt_align_albedo = f"{semantic_header_others} {base_albedo_def}"
-        
-        base_normal_def = "Ultra-High Definition 8K Surface Normal map in UV space, displaying sharp high-frequency relief with pixel-perfect clarity. The texture emphasizes intricate pore structures, fine wrinkles, and precise skin micro-geometry orientation relative to UV coordinates."
-        prompt_normal = f"{semantic_header_others} {base_normal_def}"
-        prompt_align_normal = f"{semantic_header_others} {base_normal_def}"
-        
-        base_rsd_def = "Ultra-High Definition 8K packed RSD technical texture map in UV space, consisting of three specific PBR channels. Red: Roughness/Oiliness; Green: Specular Intensity; Blue: Displacement Depth. The map captures purely physical skin surface properties."
-        prompt_rsd = f"{semantic_header_others} {base_rsd_def}"
-        prompt_align_rsd = f"{semantic_header_others} {base_rsd_def}"
-        
-        status_msg = f"Step 2 Done: Caption generated and prompts constructed based on image context."
-        
-        # return to the frontend Textbox (in the order defined by the UI)
-        return (
-            caption_with_lighting,  # caption_box (display the complete version, include lighting)
-            prompt_inpaint,         # prompt_inpaint
-            prompt_delight,         # prompt_delight
-            prompt_albedo,          # prompt_albedo
-            prompt_normal,          # prompt_normal
-            prompt_rsd,             # prompt_rsd
-            prompt_align_albedo,    # prompt_align_albedo
-            prompt_align_normal,     # prompt_align_normal
-            prompt_align_rsd,       # prompt_align_rsd
-            status_msg              # status
-        )
-        
-    except Exception as e:
-        import traceback
-        error_msg = f"Step 2 Error: {str(e)}\n{traceback.format_exc()}"
-        print(error_msg)
-        # return 7 values: caption, prompt_inpaint, prompt_delight, prompt_align_albedo, prompt_align_normal, prompt_align_rsd, status
-        return None, None, None, None, None, None, error_msg
 
 def step3_inpaint(state, prompt, negative_prompt, steps=31, guidance_scale=1.0, use_input_image_for_inpainting=False):
     """Step 3.1: Inpainting"""
@@ -740,7 +618,6 @@ def step4_align(state, align_steps=40, guidance_scale=2.0,
             )
             # generate HTML viewer
             model_viewer_html_textured = build_model_viewer_html(save_dir, height=HTML_HEIGHT, width=HTML_WIDTH, textured=True)
-            # model_viewer_html_white = build_model_viewer_html(save_dir, height=HTML_HEIGHT, width=HTML_WIDTH, textured=False)
             # convert to absolute path
             glb_path_textured = os.path.abspath(glb_path_textured)
             glb_path_white = os.path.abspath(glb_path_white)
@@ -751,7 +628,6 @@ def step4_align(state, align_steps=40, guidance_scale=2.0,
             glb_path_textured = None
             glb_path_white = None
             model_viewer_html_textured = None
-            # model_viewer_html_white = None
         
         state["align_textures"] = {
             "albedo": align_albedo,
@@ -768,13 +644,12 @@ def step4_align(state, align_steps=40, guidance_scale=2.0,
         state["glb_path_textured"] = glb_path_textured
         state["glb_path_white"] = glb_path_white
         state["model_viewer_html_textured"] = model_viewer_html_textured
-        # state["model_viewer_html_white"] = model_viewer_html_white
         
         return state, [align_albedo, align_normal, align_roughness, align_specular, align_displacement], model_viewer_html_textured, "Step 4 Done."
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        return None, None, None, None, str(e)
+        return None, None, None, str(e)
 
 def save_glb(state):
     """Save GLB (.glb) file (both textured and white model)"""
@@ -798,7 +673,7 @@ def save_glb(state):
 def save_blend(state):
     """Save Blender (.blend) file"""
     try:
-        if not state or "save_dir" not in state or "align_textures" not in state: return None, "Run Step 4 first."
+        if not state or "save_dir" not in state or "align_textures" not in state: return None, None, None, "Run Step 4 first."
         save_dir = state["save_dir"]
         mesh_data = state["mesh_data"]
         textures = state["align_textures"]
@@ -839,7 +714,7 @@ def save_blend(state):
         
         # verify if the file exists
         if not os.path.exists(blend_path_abs):
-            return None, f"Blender file not found at {blend_path_abs}"
+            return None, None, None, f"Blender file not found at {blend_path_abs}"
         return blend_path_abs, blend_path_abs_masked, blend_path_abs_sep, "Saved Blender."
     except Exception as e: 
         import traceback
@@ -1000,12 +875,6 @@ with gr.Blocks(
                             height=400,
                         )
                     btn_apply_paint = gr.Button("Apply Paint", variant="secondary")
-            
-            # --- Step 2 ---
-            with gr.Accordion("Step 2: Caption", open=True):
-                caption_box = gr.Textbox(label="Caption", lines=1)
-                btn_step2 = gr.Button("Run Step 2: Caption", elem_classes="step-btn")
-            
 
             # --- Step 3.1: Inpaint  &  Step 3.2: Delight ---
             with gr.Accordion("Step 3: Material Refinement", open=True):
@@ -1013,7 +882,7 @@ with gr.Blocks(
                     # Left side: Inpaint
                     with gr.Column(scale=1):
                         with gr.Accordion("Prompt & Settings (Inpaint)", open=False):
-                            prompt_inpaint = gr.Textbox(label="Prompt", lines=2, placeholder="Waiting for Step 2...")
+                            prompt_inpaint = gr.Textbox(label="Prompt", lines=2, value="An unfolded UV texture map of a human face, seamless, continuous texture, high fidelity, 8k resolution. Synthesize high-frequency micro-details, pixel-perfect continuity.")
                             neg_prompt_inpaint = gr.Textbox(label="Negative Prompt", lines=1, value="blur, smoothing, flat shading, mismatched lighting, visible seams, artifacts, overexposure, overexposed, blown highlights, clipped whites, excessive brightness, loss of detail in highlights")
                         with gr.Row():
                             inpaint_guidance = gr.Slider(minimum=0.0, maximum=10.0, value=1.0, step=0.1, label="Guidance")
@@ -1024,7 +893,7 @@ with gr.Blocks(
                     # Right side: Delight
                     with gr.Column(scale=1):
                         with gr.Accordion("Prompt & Settings (Delight)", open=False):
-                            prompt_delight = gr.Textbox(label="Prompt", lines=2, placeholder="Waiting for Step 2...")
+                            prompt_delight = gr.Textbox(label="Prompt", lines=2, value="An unfolded UV texture map of a human face. Normalized lighting texture map, calibrated neutral illumination. Uniform pixel intensity distribution across the entire facial surface. Eliminate all lighting gradients, environmental bias, and directional shading. Perfectly balanced exposure, strictly retaining high-frequency micro-details, razor-sharp pores, and authentic skin grain. High-fidelity raw texture quality. Raw, 8k, highly detailed, macro photography, hard focus. Remove all lighting, shadows, and shading. Generate flat, unlit base color texture.")
                             neg_prompt_delight = gr.Textbox(label="Negative Prompt", lines=1, value="blur, smoothing, flat shading, mismatched lighting, visible seams, artifacts")
                         with gr.Row():
                             delight_guidance = gr.Slider(minimum=0.0, maximum=10.0, value=2.0, step=0.1, label="Guidance")
@@ -1082,15 +951,15 @@ with gr.Blocks(
                         with gr.Tabs():
                             with gr.Tab("Albedo"):
                                 with gr.Accordion("Prompt & Settings (Albedo)", open=False):
-                                    prompt_align_albedo = gr.Textbox(label="Prompt", lines=2, placeholder="Waiting for Step 2...")
+                                    prompt_align_albedo = gr.Textbox(label="Prompt", lines=2, value="Ultra-High Definition 8K Diffuse Albedo map of a human face texture, flat lighting, unlit base color, pixel-perfect clarity. The texture reveals natural melanin pigmentation, hemoglobin redness, and distinct subsurface scattering warmth zones. It features high-frequency skin details including specific facial moles, freckles, and capillary variations. The chart is completely void of baked shadows, ambient occlusion, or specular highlights, representing pure biological skin color values in UV space.")
                                     neg_prompt_align_albedo = gr.Textbox(label="Neg", lines=1, value="blur, smoothing, flat shading, mismatched lighting, visible seams, artifacts, low resolution, baked lighting removal, cartoonish, loss of detail, interpolated pixels")
                             with gr.Tab("Normal"):
                                 with gr.Accordion("Prompt & Settings (Normal)", open=False):
-                                    prompt_align_normal = gr.Textbox(label="Prompt", lines=2, placeholder="Waiting for Step 2...")
+                                    prompt_align_normal = gr.Textbox(label="Prompt", lines=2, value="Ultra-High Definition 8K Surface Normal map of a human face texture in UV space, displaying sharp high-frequency relief with pixel-perfect clarity. The texture emphasizes intricate pore structures, fine wrinkles, and precise skin micro-geometry orientation relative to UV coordinates, where RGB vectors accurately represent surface angles and bumps without any albedo color or lighting information, achieving absolute biological structural realism.")
                                     neg_prompt_align_normal = gr.Textbox(label="Neg", lines=1, value="blur, smoothing, flat shading, mismatched lighting, visible seams, artifacts, low resolution, baked lighting removal, cartoonish, loss of detail, interpolated pixels")
                             with gr.Tab("RSD"):
                                 with gr.Accordion("Prompt & Settings (RSD)", open=False):
-                                    prompt_align_rsd = gr.Textbox(label="Prompt", lines=2, placeholder="Waiting for Step 2...")
+                                    prompt_align_rsd = gr.Textbox(label="Prompt", lines=2, value="Ultra-High Definition 8K packed RSD technical texture map of a human face in UV space, consisting of three specific PBR channels. The Red channel encodes detailed micro-surface roughness and oiliness zones; the Green channel defines high-fidelity specular reflection intensity; and the Blue channel represents displacement depth for palpable pores and wrinkles. The map captures purely physical skin surface properties distinct from diffuse color or tangent normals.")
                                     neg_prompt_align_rsd = gr.Textbox(label="Neg", lines=1, value="blur, smoothing, flat shading, mismatched lighting, visible seams, artifacts, low resolution, baked lighting removal, cartoonish, loss of detail, interpolated pixels")
                     with gr.Column(scale=1):
                         align_steps = gr.Number(value=40, label="Steps", precision=0)
@@ -1101,15 +970,11 @@ with gr.Blocks(
                 with gr.Row():
                     with gr.Column(scale=3):
                         gallery_align = gr.Gallery(label="Align Results", columns=2, height=600)
-                # with gr.Row():
                     with gr.Column(scale=4):
                         out_glb_textured = gr.HTML(label="3D Preview (Textured)", value="<div style='height: 650px; width: 100%; display: flex; justify-content: center; align-items: center;'><p>Waiting for model generation...</p></div>")
-                    # with gr.Column(scale=1):
-                        # out_glb_white = gr.HTML(label="3D Preview (White Model)", value="<div style='height: 650px; width: 100%; display: flex; justify-content: center; align-items: center;'><p>Waiting for model generation...</p></div>")
                 with gr.Row():
                     btn_save_glb = gr.Button("Save GLB: Textured Model", variant="secondary")
                     btn_save_blend = gr.Button("Save Blend: Textured Model", variant="secondary")
-                    btn_save_blend_sep = gr.Button("Save Blend: Separated Model", variant="secondary")
                 with gr.Row():
                     out_glb_file = gr.File(label="Textured Model GLB File", interactive=False, file_types=[".glb"], elem_classes="file-output", height=80)
                     out_glb_white_file = gr.File(label="White Model GLB File", interactive=False, file_types=[".glb"], elem_classes="file-output", height=80)
@@ -1127,7 +992,6 @@ with gr.Blocks(
     )
     btn_apply_paint.click(apply_manual_paint, [state, manual_paint_img], [state, out_sr_final, manual_paint_preview, status])
 
-    btn_step2.click(step2_caption, [state], [caption_box, prompt_inpaint, prompt_delight, prompt_albedo, prompt_normal, prompt_rsd, prompt_align_albedo, prompt_align_normal, prompt_align_rsd, status])
     btn_step3_1.click(step3_inpaint, [state, prompt_inpaint, neg_prompt_inpaint, inpaint_steps, inpaint_guidance, use_input_image_for_inpainting_checkbox], [state, out_inpaint, status])
     btn_step3_2.click(step3_delight, [state, prompt_delight, neg_prompt_delight, delight_steps, delight_guidance], [state, out_delight, status])
     btn_step3_3_albedo.click(lambda s,p,n,st,g: step3_separate(s,"albedo",p,n,st,g), [state, prompt_albedo, neg_prompt_albedo, albedo_steps, albedo_guidance], [state, out_albedo, status])

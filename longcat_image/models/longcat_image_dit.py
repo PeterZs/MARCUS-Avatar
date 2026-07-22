@@ -12,6 +12,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from accelerate.logging import get_logger
 from diffusers.loaders import PeftAdapterMixin
+from diffusers.models.cache_utils import CacheMixin
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -30,7 +31,7 @@ class TimestepEmbeddings(nn.Module):
         return timesteps_emb
     
 
-class LongCatImageTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin ):
+class LongCatImageTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, CacheMixin ):
     """
     The Transformer model introduced in Flux.
     """

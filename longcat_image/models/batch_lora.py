@@ -167,7 +167,13 @@ def inject_trainable_batched_lora(
 
 def find_modules(
     model,
-    ancestor_class: Optional[List[str]] = ["LongCatImageTransformerBlock", "LongCatImageSingleTransformerBlock"],
+    ancestor_class: Optional[List[str]] = [
+        "LongCatImageTransformerBlock",
+        "LongCatImageSingleTransformerBlock",
+        # the vendored DiT (longcat_image_dit.py) builds its blocks from diffusers' Flux blocks
+        "FluxTransformerBlock",
+        "FluxSingleTransformerBlock",
+    ],
     target_module_names: Optional[Set[str]] = None,
     search_class: List[Type[nn.Module]] = [nn.Linear],
     exclude_children_of: Optional[List[Type[nn.Module]]] = [

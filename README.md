@@ -25,6 +25,11 @@ conda activate marcus
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 pip install -r requirements.txt
+
+# basicsr 1.4.2 (pulled in by realesrgan) is incompatible with torchvision>=0.18;
+# patch the installed file once (also noted at the bottom of requirements.txt):
+sed -i 's|torchvision\.transforms\.functional_tensor|torchvision.transforms.functional|' \
+  "$(python -c 'import basicsr, os; print(os.path.dirname(basicsr.__file__))')/data/degradations.py"
 ```
 
 ### Option 2: pixi
@@ -52,12 +57,7 @@ ckpts/
 assets/topo/
 ```
 
-By default, the runtime loads these upstream models directly from Hugging Face:
-
-```text
-meituan-longcat/LongCat-Image-Edit
-fancyfeast/llama-joycaption-beta-one-hf-llava
-```
+By default, the runtime loads the base diffusion model `meituan-longcat/LongCat-Image-Edit` directly from Hugging Face. `batch_infer.py` additionally loads `fancyfeast/llama-joycaption-beta-one-hf-llava` for captioning (the Gradio demo uses editable default prompts instead).
 
 If you keep local copies or run in an offline environment, override the paths with environment variables.
 
@@ -96,7 +96,21 @@ The input can be either a single image or a folder. See all options with:
 python batch_infer.py --help
 ```
 
-Typical outputs include reconstructed meshes, UV textures, PBR material maps, and optional `.glb` / `.blend` files. `.blend` export requires Blender to be available through `BLENDER_PATH` or the `blender` command.
+Typical outputs include reconstructed meshes, UV textures, PBR material maps, and optional `.glb` / `.blend` files.
+
+### Blender (optional, only for `.blend` export)
+
+Blender is **not installed automatically**. When exporting `.blend`, the app looks for an executable in this order: `$BLENDER_PATH`, `blender` on `PATH`, `/usr/bin/blender`. If none is found, the export fails and the status box reports `Blender executable was not found; set the BLENDER_PATH environment variable`. `.glb` export does not require Blender.
+
+Install options:
+
+```bash
+# Option A: via pixi / conda-forge (available on PATH inside `pixi shell` / `pixi run`)
+pixi add blender
+
+# Option B: download from https://www.blender.org/download/ and point the app at it
+export BLENDER_PATH="/path/to/blender"
+```
 
 ## Repository Structure
 
@@ -107,6 +121,8 @@ MARCUS-Avatar/
 ├── download_weights.py     # Hugging Face weight downloader
 ├── runtime_paths.py        # Shared runtime path configuration
 ├── pipeline.py             # Pipeline utilities and programmatic inference helpers
+├── adjust_mask.py          # CLI utility to erode/dilate/open/close masks
+├── inplace_abn.py          # Pure-Python fallback for the optional inplace_abn extension
 ├── longcat_image/          # Core model, preprocessing, reconstruction, texture, and render code
 ├── third_party/            # Vendored face detection / parsing helpers
 ├── utils/                  # Image I/O plus GLB / Blender export helpers

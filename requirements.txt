@@ -1,13 +1,17 @@
 # Core dependencies for MARCUS-Avatar inference
+# Pins below match the verified runtime (kept in sync with pixi.toml).
 
 # Deep learning / diffusion
 torch>=2.0.0
 torchvision
 torchaudio
-diffusers>=0.27.0
-transformers>=4.36.0
-accelerate
-peft
+# LongCat-Image official environment. diffusers>=0.36 ships a native
+# LongCatImageTransformer2DModel which shadows the vendored class and breaks loading.
+diffusers==0.35.2
+transformers==4.57.1
+accelerate==1.11.0
+peft==0.18.0
+huggingface_hub>=0.34.0,<1.0
 safetensors
 einops
 sentencepiece
@@ -25,6 +29,7 @@ scikit-image
 Pillow
 imageio
 imageio-ffmpeg
+realesrgan>=0.3.0
 
 # 3D / rendering
 numpy
@@ -37,8 +42,16 @@ gradio>=4.0
 # Utilities
 tqdm
 easydict
-huggingface_hub
 torchsummary
 
-# Optional: super-resolution (Real-ESRGAN/BasicSR submodules)
-# See extensions/ for submodule setup instructions.
+# ---------------------------------------------------------------------------
+# Post-install note (Real-ESRGAN / BasicSR):
+# basicsr 1.4.2 does `from torchvision.transforms.functional_tensor import ...`,
+# a module removed in torchvision>=0.18. Patch the installed file once:
+#
+#   sed -i 's|torchvision\.transforms\.functional_tensor|torchvision.transforms.functional|' \
+#     "$(python -c 'import basicsr, os; print(os.path.dirname(basicsr.__file__))')/data/degradations.py"
+#
+# (pixi users: `pixi run app` / `pixi run batch-infer` apply this automatically
+# via the `patch-basicsr` task.)
+# ---------------------------------------------------------------------------
