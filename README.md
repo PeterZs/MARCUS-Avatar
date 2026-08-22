@@ -2,7 +2,7 @@
 
 Official implementation of **"Monocular Avatar Reconstruction via Cascaded Diffusion Priors and UV-Space Differentiable Shading"** (ECCV 2026).
 
-[[Project Page](https://luh1124.github.io/MARCUS-Avatar-Projectpage/)] · [[Paper](https://arxiv.org/abs/2606.28144)] · [[HF Weights](https://huggingface.co/luh0502/MARCUS-Avatar)]
+[[Project Page](https://luh1124.github.io/MARCUS-Avatar-Projectpage/)] · [[Paper](https://arxiv.org/abs/2606.28144)] · [[HF Weights](https://huggingface.co/luh0502/MARCUS-Avatar)] · [[HF Data](https://huggingface.co/datasets/luh0502/Marcus-avatar-data)]
 
 ## Overview
 
@@ -60,6 +60,39 @@ assets/topo/
 By default, the runtime loads the base diffusion model `meituan-longcat/LongCat-Image-Edit` directly from Hugging Face. `batch_infer.py` additionally loads `fancyfeast/llama-joycaption-beta-one-hf-llava` for captioning (the Gradio demo uses editable default prompts instead).
 
 If you keep local copies or run in an offline environment, override the paths with environment variables.
+
+## Training Data
+
+The relit renders and UV unwraps used to train MARCUS are released as
+[`luh0502/Marcus-avatar-data`](https://huggingface.co/datasets/luh0502/Marcus-avatar-data).
+Everything is stored as uncompressed [WebDataset](https://github.com/webdataset/webdataset)
+tar shards, keyed by the source dataset's image id:
+
+| config | source | samples | shards | size |
+|---|---|---|---|---|
+| `ffhq1024_rendered` | FFHQ-1024 | 69,999 | 140 | ~755 GB |
+| `ffhq1024_unwrap_texture` | FFHQ-1024 | 69,999 | 35 | ~194 GB |
+| `celebamask_hq_rendered` | CelebAMask-HQ | 29,994 | 60 | ~330 GB |
+| `celebamask_hq_unwrap_texture` | CelebAMask-HQ | 29,994 | 15 | ~83 GB |
+
+`rendered` holds three HDRI relightings per sample (`render_hdri_{0,1,2}.png`) with their
+baked textures and environment maps, plus an evenly lit bake. `unwrap_texture` holds the
+fitted meshes, the unwrapped UV texture, and the 3DMM coefficients / landmarks / transform
+tensors. Per-key details are in the dataset card.
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("luh0502/Marcus-avatar-data", "ffhq1024_rendered",
+                  split="train", streaming=True)
+sample = next(iter(ds))
+print(sample["__key__"], sample["render_hdri_0.png"].size)
+```
+
+Shard-to-id ranges are listed in each subset's `shard_index.json`, so a single id range can
+be fetched without pulling the whole config. The source datasets are non-commercial research
+licenses (FFHQ is CC BY-NC-SA 4.0 with per-photograph Flickr rights; CelebAMask-HQ is
+research-only) and those terms carry over to this derived data.
 
 ## Runtime Paths
 
